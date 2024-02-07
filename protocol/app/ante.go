@@ -2,7 +2,8 @@ package app
 
 import (
 	errorsmod "cosmossdk.io/errors"
-	"github.com/cosmos/cosmos-sdk/baseapp"
+	storetypes "cosmossdk.io/store/types"
+	"github.com/cosmos/cosmos-sdk/codec"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	sdkerrors "github.com/cosmos/cosmos-sdk/types/errors"
 	"github.com/cosmos/cosmos-sdk/x/auth/ante"
@@ -18,7 +19,9 @@ import (
 // struct embedding to include the normal cosmos-sdk `HandlerOptions`.
 type HandlerOptions struct {
 	ante.HandlerOptions
-	ClobKeeper clobtypes.ClobKeeper
+	Codec        codec.Codec
+	AuthStoreKey storetypes.StoreKey
+	ClobKeeper   clobtypes.ClobKeeper
 }
 
 // NewAnteHandler returns an AnteHandler that checks and increments sequence
@@ -51,7 +54,11 @@ func NewAnteHandler(options HandlerOptions) (sdk.AnteHandler, error) {
 // NewAnteDecoratorChain returns a list of AnteDecorators in the expected application chain ordering
 func NewAnteDecoratorChain(options HandlerOptions) []sdk.AnteDecorator {
 	return []sdk.AnteDecorator{
-		baseapp.NewLockAndCacheContextAnteDecorator(),
+		// DeliverTx is executing using a lock and a branched multistore ensuring that all invocations are handled
+		// serially allowing for any reads and writes without needing to hold any additional locks.
+		// For CheckTx we are executing with an UNBRANCHED multistore so it is critical that no writes are
+		// performed as those writes will be directly to the check state and also will cause race conditions.
+
 		// Note: app-injected messages, and clob transactions don't require Gas fees.
 		libante.NewAppInjectedMsgAnteWrapper(
 			clobante.NewSingleMsgClobTxAnteWrapper(
@@ -72,9 +79,14 @@ func NewAnteDecoratorChain(options HandlerOptions) []sdk.AnteDecorator {
 
 		ante.NewTxTimeoutHeightDecorator(),
 		ante.NewValidateMemoDecorator(options.AccountKeeper),
+
+		// For CLOB CheckTx we need to grab a lock over all accounts that are part of signing. This allows
+		// us to read and write account information in a manner in which all account reads and writes are linearized.
+		customante.NewLockAccountsAnteDecorator(options.Codec, options.AuthStoreKey),
 		ante.NewConsumeGasForTxSizeDecorator(options.AccountKeeper),
 
-		// Note: app-injected messages, and clob transactions don't require Gas fees.
+		// Note: app-injected messages, and clob transactions don't require Gas fees. This is important
+		// since we do not have any locks over the bank or fee keeper to linearize the reads and writes.
 		libante.NewAppInjectedMsgAnteWrapper(
 			clobante.NewSingleMsgClobTxAnteWrapper(
 				ante.NewDeductFeeDecorator(
@@ -111,6 +123,10 @@ func NewAnteDecoratorChain(options HandlerOptions) []sdk.AnteDecorator {
 			),
 		),
 
+		// At this point in time we grab a lock ensuring that the ante handlers below are processed
+		// serially. Note that no AccountKeeper is used so we don't require any lock coarsening for
+		// any accounts that could be involved with the CLOB message.
+		customante.NewLockAnteDecorator(),
 		clobante.NewRateLimitDecorator(options.ClobKeeper),
 		clobante.NewClobDecorator(options.ClobKeeper),
 	}

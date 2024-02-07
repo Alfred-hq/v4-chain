@@ -1,6 +1,8 @@
 package app_test
 
 import (
+	"cosmossdk.io/store/rootmulti"
+	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
 	"testing"
 
 	"github.com/cosmos/cosmos-sdk/x/auth/ante"
@@ -21,6 +23,9 @@ func newHandlerOptions() app.HandlerOptions {
 			SigGasConsumer:  ante.DefaultSigVerificationGasConsumer,
 		},
 		ClobKeeper: dydxApp.ClobKeeper,
+		Codec:      encodingConfig.Codec,
+		// TODO: Fix
+		AuthStoreKey: dydxApp.CommitMultiStore().(*rootmulti.Store).StoreKeysByName()[authtypes.StoreKey],
 	}
 }
 
