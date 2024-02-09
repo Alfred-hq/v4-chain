@@ -25,6 +25,7 @@ func NewLockingAnteDecorators(cdc codec.Codec, authStoreKey storetypes.StoreKey)
 		accountLockAnteDecorator{
 			cdc:          cdc,
 			authStoreKey: authStoreKey,
+			mtx:          mtx,
 		},
 		nonClobLockAnteDecorator{
 			mtx: mtx,
