@@ -53,11 +53,13 @@ func NewAnteHandler(options HandlerOptions) (sdk.AnteHandler, error) {
 
 // NewAnteDecoratorChain returns a list of AnteDecorators in the expected application chain ordering
 func NewAnteDecoratorChain(options HandlerOptions) []sdk.AnteDecorator {
+	writeAndUnlock, accLocking, globalLocking := customante.NewLockingAnteDecorators(options.Codec, options.AuthStoreKey)
 	return []sdk.AnteDecorator{
 		// DeliverTx is executing using a lock and a branched multistore ensuring that all invocations are handled
 		// serially allowing for any reads and writes without needing to hold any additional locks.
 		// For CheckTx we are executing with an UNBRANCHED multistore so it is critical that no writes are
 		// performed as those writes will be directly to the check state and also will cause race conditions.
+		writeAndUnlock,
 
 		// Note: app-injected messages, and clob transactions don't require Gas fees.
 		libante.NewAppInjectedMsgAnteWrapper(
@@ -82,7 +84,7 @@ func NewAnteDecoratorChain(options HandlerOptions) []sdk.AnteDecorator {
 
 		// For CLOB CheckTx we need to grab a lock over all accounts that are part of signing. This allows
 		// us to read and write account information in a manner in which all account reads and writes are linearized.
-		customante.NewLockAccountsAnteDecorator(options.Codec, options.AuthStoreKey),
+		accLocking,
 		ante.NewConsumeGasForTxSizeDecorator(options.AccountKeeper),
 
 		// Note: app-injected messages, and clob transactions don't require Gas fees. This is important
@@ -126,7 +128,7 @@ func NewAnteDecoratorChain(options HandlerOptions) []sdk.AnteDecorator {
 		// At this point in time we grab a lock ensuring that the ante handlers below are processed
 		// serially. Note that no AccountKeeper is used so we don't require any lock coarsening for
 		// any accounts that could be involved with the CLOB message.
-		customante.NewLockAnteDecorator(),
+		globalLocking,
 		clobante.NewRateLimitDecorator(options.ClobKeeper),
 		clobante.NewClobDecorator(options.ClobKeeper),
 	}

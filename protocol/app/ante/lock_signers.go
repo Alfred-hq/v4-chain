@@ -14,28 +14,30 @@ import (
 	"sync"
 )
 
-var _ sdk.AnteDecorator = lockAccountsAnteDecorator{}
-var _ sdk.AnteDecorator = lockAnteDecorator{}
+var _ sdk.AnteDecorator = accountLockAnteDecorator{}
+var _ sdk.AnteDecorator = nonClobLockAnteDecorator{}
 
-func NewLockAnteDecorator() sdk.AnteDecorator {
-	return lockAnteDecorator{}
+func NewLockingAnteDecorators(cdc codec.Codec, authStoreKey storetypes.StoreKey) (writeAndUnlock sdk.AnteDecorator, selectiveLocking sdk.AnteDecorator, clobLocking sdk.AnteDecorator) {
+	mtx := &sync.Mutex{}
+	return writeAndUnlockAnteDecorator{
+			mtx: mtx,
+		},
+		accountLockAnteDecorator{
+			cdc:          cdc,
+			authStoreKey: authStoreKey,
+		},
+		nonClobLockAnteDecorator{
+			mtx: mtx,
+		}
 }
 
-func NewLockAccountsAnteDecorator(cdc codec.Codec, authStoreKey storetypes.StoreKey) sdk.AnteDecorator {
-	return lockAccountsAnteDecorator{
-		cdc:             cdc,
-		authStoreKey:    authStoreKey,
-		lockAndCacheCtx: NewLockAnteDecorator(),
-	}
+type accountLockAnteDecorator struct {
+	cdc          codec.Codec
+	authStoreKey storetypes.StoreKey
+	mtx          *sync.Mutex
 }
 
-type lockAccountsAnteDecorator struct {
-	cdc             codec.Codec
-	authStoreKey    storetypes.StoreKey
-	lockAndCacheCtx sdk.AnteDecorator
-}
-
-func (l lockAccountsAnteDecorator) AnteHandle(
+func (l accountLockAnteDecorator) AnteHandle(
 	ctx sdk.Context,
 	tx sdk.Tx,
 	simulate bool,
@@ -47,9 +49,13 @@ func (l lockAccountsAnteDecorator) AnteHandle(
 	}
 
 	if !isClob {
-		return l.lockAndCacheCtx.AnteHandle(ctx, tx, simulate, next)
+		// Acquire a global lock for all non-CLOB messages.
+		cacheMs := ctx.MultiStore().(cachemulti.Store).CacheMultiStore()
+		l.mtx.Lock()
+		return next(ctx.WithMultiStore(cacheMs), tx, simulate)
 	}
 
+	// For CLOB messages grab a lock for the account store for the keys that are part of signing.
 	sigTx, ok := tx.(authsigning.SigVerifiableTx)
 	if !ok {
 		return ctx, errorsmod.Wrap(sdkerrors.ErrTxDecode, "Tx must be a sigTx")
@@ -72,20 +78,38 @@ func (l lockAccountsAnteDecorator) AnteHandle(
 		l.authStoreKey: accountStoreKeys,
 	})
 
-	newCtx, err := next(ctx.WithMultiStore(cacheMs), tx, simulate)
-	if err == nil {
-		cacheMs.Write()
+	return next(ctx.WithMultiStore(cacheMs), tx, simulate)
+}
+
+type nonClobLockAnteDecorator struct {
+	mtx *sync.Mutex
+}
+
+func (l nonClobLockAnteDecorator) AnteHandle(ctx sdk.Context, tx sdk.Tx, simulate bool, next sdk.AnteHandler) (sdk.Context, error) {
+	isClob, err := clobante.IsSingleClobMsgTx(ctx, tx)
+
+	// We only have CLOB decorators after this so we can return early here since they are no-ops for non-CLOB messages.
+	if err != nil || !isClob {
+		return ctx, err
 	}
-	return newCtx, err
-}
 
-type lockAnteDecorator struct {
-	mtx sync.Mutex
-}
-
-func (l lockAnteDecorator) AnteHandle(ctx sdk.Context, tx sdk.Tx, simulate bool, next sdk.AnteHandler) (sdk.Context, error) {
+	// Only acquire the global lock if this is a CLOB message since non CLOB messages would have already
+	// acquired a global lock earlier.
 	l.mtx.Lock()
-	defer l.mtx.Unlock()
 
 	return next(ctx, tx, simulate)
+}
+
+type writeAndUnlockAnteDecorator struct {
+	mtx *sync.Mutex
+}
+
+func (l writeAndUnlockAnteDecorator) AnteHandle(ctx sdk.Context, tx sdk.Tx, simulate bool, next sdk.AnteHandler) (sdk.Context, error) {
+	newCtx, err := next(ctx, tx, simulate)
+	if err == nil {
+		newCtx.MultiStore().(storetypes.CacheMultiStore).Write()
+	}
+
+	l.mtx.Unlock()
+	return newCtx, err
 }
